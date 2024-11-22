@@ -66,6 +66,161 @@ void quatToDCM(float *quat, struct mat33 *RotM)
   RotM->m[2][2] = q0*q0-q1*q1-q2*q2+q3*q3;
 }
 
+void omni_attitude_controller_TableGimbal(void)
+{
+  struct mat33 R_r = mzero();
+  struct mat33 R = mzero();
+
+  quatToDCM((float*)&omni_attitude_controller_U.qw_r, &R_r);
+  quatToDCM((float*)&omni_attitude_controller_U.qw_IMU, &R);
+
+  struct mat33 R_r_T =  mtranspose(R_r);
+  struct mat33 R_T =  mtranspose(R);
+  struct mat33 E = mscl(0.5f, msub(mmul(R_r_T, R) , mmul(R_T, R_r)));
+
+  // eR -> xd - x
+  struct vec eR = vzero();
+  eR.x = -E.m[2][1];
+  eR.y = -E.m[0][2];
+  eR.z = -E.m[1][0];
+
+  omni_attitude_controller_Y.wx_r = (real32_T)Omni_gains.krx * eR.x; 
+  omni_attitude_controller_Y.wy_r = (real32_T)Omni_gains.kry * eR.y;
+  omni_attitude_controller_Y.wz_r = (real32_T)Omni_gains.krz * eR.z;
+
+  // eW = agvr - w
+  struct vec eW = vzero();
+  eW.x = (float)omni_attitude_controller_Y.wx_r - omni_attitude_controller_U.gyro_x;
+  eW.y = (float)omni_attitude_controller_Y.wy_r - omni_attitude_controller_U.gyro_y;
+  eW.z = (float)omni_attitude_controller_Y.wz_r - omni_attitude_controller_U.gyro_z;
+
+    // Thrust Clamper
+  float Thrust;
+  if (omni_attitude_controller_U.thrust >
+      omni_attitude_controller_P.Saturation_UpperSat) {
+    Thrust = omni_attitude_controller_P.Saturation_UpperSat;
+  } else if (omni_attitude_controller_U.thrust <
+             omni_attitude_controller_P.Saturation_LowerSat) {
+    Thrust = omni_attitude_controller_P.Saturation_LowerSat;
+  } else {
+    Thrust = omni_attitude_controller_U.thrust;
+  }
+
+  if(omni_attitude_controller_Y.LastThrustCmd < 0.000898f && Thrust > 0.000898f)
+  {
+    omni_attitude_controller_Y.Treset = 1;
+    omni_attitude_controller_Y.eixInt = 0;
+    omni_attitude_controller_Y.eiyInt = 0;
+    omni_attitude_controller_Y.eizInt = 0;
+  } else {
+    omni_attitude_controller_Y.Treset = 0;
+  }
+
+  omni_attitude_controller_Y.LastThrustCmd = (real32_T)Thrust;
+
+  // eiInt
+  if( omni_attitude_controller_Y.IsClamped == 0 && Thrust > 0.000898f )
+  {
+    omni_attitude_controller_Y.eixInt = omni_attitude_controller_Y.eixInt + eW.x * 0.002f;
+    omni_attitude_controller_Y.eiyInt = omni_attitude_controller_Y.eiyInt + eW.y * 0.002f;
+    omni_attitude_controller_Y.eizInt = omni_attitude_controller_Y.eizInt + eW.z * 0.002f;
+  }
+
+  struct vec eiInt = vzero();
+  eiInt.x = omni_attitude_controller_Y.eixInt;
+  eiInt.y = omni_attitude_controller_Y.eiyInt;
+  eiInt.z = omni_attitude_controller_Y.eizInt;
+
+  struct vec uW = vzero();
+  struct vec ui = vzero();
+  struct vec ud = vzero();
+  struct vec controlTorque = vzero();
+
+  uW.x = Omni_gains.kwx * eW.x;
+  uW.y = Omni_gains.kwy * eW.y;
+  uW.z = Omni_gains.kwz * eW.z;
+
+  ui.x = Omni_gains.kix * eiInt.x;
+  ui.y = Omni_gains.kiy * eiInt.y;
+  ui.z = Omni_gains.kiz * eiInt.z;
+
+  ud.x = Omni_gains.kdx * (eW.x - omni_attitude_controller_Y.LasteWx) / 0.002f;
+  ud.y = Omni_gains.kdy * (eW.y - omni_attitude_controller_Y.LasteWy) / 0.002f;
+  ud.z = Omni_gains.kdz * (eW.z - omni_attitude_controller_Y.LasteWz) / 0.002f;
+
+  // update 
+  omni_attitude_controller_Y.LasteWx = eW.x;
+  omni_attitude_controller_Y.LasteWy = eW.y;
+  omni_attitude_controller_Y.LasteWz = eW.z;
+
+  controlTorque = mvmul(CRAZYFLIE_INERTIA_I, vadd(ud, vadd(ui,uW)));
+
+  omni_attitude_controller_Y.Tau_x = controlTorque.x;
+  omni_attitude_controller_Y.Tau_y = controlTorque.y;
+  omni_attitude_controller_Y.Tau_z = controlTorque.z;
+
+  // power distribution and turn Nm into N
+  const float arm = 0.707106781f * 0.046f;
+  const float rollPart = 0.25f / arm * omni_attitude_controller_Y.Tau_x;
+  const float pitchPart = 0.25f / arm * omni_attitude_controller_Y.Tau_y;
+  const float thrustPart = 0.25f * Thrust; // N (per rotor)
+  const float yawPart = 0.25f * omni_attitude_controller_Y.Tau_z / 0.005964552f;
+
+  omni_attitude_controller_Y.rollPart = rollPart;
+  omni_attitude_controller_Y.pitchPart = pitchPart;
+  omni_attitude_controller_Y.thrustPart = thrustPart;
+  omni_attitude_controller_Y.yawPart = yawPart;
+
+  // t_mi 's Unit is Newton
+  omni_attitude_controller_Y.t_m1 = thrustPart - rollPart - pitchPart - yawPart;
+  omni_attitude_controller_Y.t_m2 = thrustPart - rollPart + pitchPart + yawPart;
+  omni_attitude_controller_Y.t_m3 = thrustPart + rollPart + pitchPart - yawPart;
+  omni_attitude_controller_Y.t_m4 = thrustPart + rollPart - pitchPart + yawPart;
+
+  omni_attitude_controller_Y.IsClamped = 0;
+  if (omni_attitude_controller_Y.t_m1 < 0.0f) 
+  {
+    omni_attitude_controller_Y.t_m1 = 0.0f;
+    omni_attitude_controller_Y.IsClamped = 1;
+  } else if (omni_attitude_controller_Y.t_m1 > 0.1472f) {
+    omni_attitude_controller_Y.t_m1 = 0.1472f;
+    omni_attitude_controller_Y.IsClamped = 1;
+  }
+
+  if (omni_attitude_controller_Y.t_m2 < 0.0f) 
+  {
+    omni_attitude_controller_Y.t_m2 = 0.0f;
+    omni_attitude_controller_Y.IsClamped = 1;
+  } else if (omni_attitude_controller_Y.t_m2 > 0.1472f) {
+    omni_attitude_controller_Y.t_m2 = 0.1472f;
+    omni_attitude_controller_Y.IsClamped = 1;
+  }
+
+  if (omni_attitude_controller_Y.t_m3 < 0.0f) 
+  {
+    omni_attitude_controller_Y.t_m3 = 0.0f;
+    omni_attitude_controller_Y.IsClamped = 1;
+  } else if (omni_attitude_controller_Y.t_m3 > 0.1472f) {
+    omni_attitude_controller_Y.t_m3 = 0.1472f;
+    omni_attitude_controller_Y.IsClamped = 1;
+  }
+
+  if (omni_attitude_controller_Y.t_m4 < 0.0f) 
+  {
+    omni_attitude_controller_Y.t_m4 = 0.0f;
+    omni_attitude_controller_Y.IsClamped = 1;
+  } else if (omni_attitude_controller_Y.t_m4 > 0.1472f) {
+    omni_attitude_controller_Y.t_m4 = 0.1472f;
+    omni_attitude_controller_Y.IsClamped = 1;
+  }
+
+  // Turn Newton into percentage and count
+  omni_attitude_controller_Y.m1 = omni_attitude_controller_Y.t_m1 / 0.1472f * 65535;
+  omni_attitude_controller_Y.m2 = omni_attitude_controller_Y.t_m2 / 0.1472f * 65535;
+  omni_attitude_controller_Y.m3 = omni_attitude_controller_Y.t_m3 / 0.1472f * 65535;
+  omni_attitude_controller_Y.m4 = omni_attitude_controller_Y.t_m4 / 0.1472f * 65535;
+}
+
 void omni_attitude_controller_DoAttitudeLoop(void)
 {
   // quaternion command to DCM (in i-frame)
@@ -105,7 +260,8 @@ void omni_attitude_controller_DoAttitudeLoop(void)
 
   omni_attitude_controller_Y.wx_r = (real32_T)Omni_gains.krx * eR.x + (real32_T)Omni_gains.krix * omni_attitude_controller_Y.eRxInt; 
   omni_attitude_controller_Y.wy_r = (real32_T)Omni_gains.kry * eR.y + (real32_T)Omni_gains.kriy * omni_attitude_controller_Y.eRyInt;
-  omni_attitude_controller_Y.wz_r = (real32_T)Omni_gains.krz * eR.z + (real32_T)Omni_gains.kriz * omni_attitude_controller_Y.eRzInt; 
+  omni_attitude_controller_Y.wz_r = (real32_T)Omni_gains.krz * eR.z + (real32_T)Omni_gains.kriz * omni_attitude_controller_Y.eRzInt;
+  
 }
 
 void omni_attitude_controller_DoAttitudeRateLoop(float dt)

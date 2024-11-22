@@ -223,6 +223,7 @@ extern void omni_attitude_controller_step_hand(void);
 extern void omni_attitude_controller_terminate(void);
 extern void omni_attitude_controller_DoAttitudeLoop(void);
 extern void omni_attitude_controller_DoAttitudeRateLoop(float dt);
+extern void omni_attitude_controller_TableGimbal(void);
 /*-
  * These blocks were eliminated from the model due to optimizations:
  *

@@ -75,11 +75,12 @@ void controllerOmniAtt(control_t *control, const setpoint_t *setpoint,
       omni_attitude_controller_U.gyro_y = radians(sensors->gyro.y);
       omni_attitude_controller_U.gyro_z = radians(sensors->gyro.z);
 
-      omni_attitude_controller_DoAttitudeLoop();
+      // omni_attitude_controller_DoAttitudeLoop();
+      omni_attitude_controller_TableGimbal();
   }
 
-  float dt = 0.001f;
-  omni_attitude_controller_DoAttitudeRateLoop(dt);
+  // float dt = 0.001f;
+  // omni_attitude_controller_DoAttitudeRateLoop(dt);
 
   if (setpoint->thrust < 0.000898f)
   {
